@@ -1,6 +1,6 @@
 # WedLink — Sri Lanka's Wedding Marketplace
 
-> **MVP Web Application** built with Next.js 14, Supabase, Stripe, and Resend.
+> **MVP Web Application** built with Next.js 14, Supabase, PayHere, and Resend.
 
 ---
 
@@ -23,7 +23,7 @@
 WedLink is a two-sided marketplace connecting Sri Lankan couples with wedding vendors. It includes:
 
 - **Couple features** — Vendor discovery, booking flow, messaging, checklist, budget tracker, guest list + RSVP, seating planner, mood board, AI day-of timeline
-- **Vendor features** — Business profile, portfolio, availability calendar, booking management, analytics dashboard, Stripe payouts
+- **Vendor features** — Business profile, portfolio, availability calendar, booking management, analytics dashboard, PayHere payouts
 - **Admin panel** — Vendor approvals, dispute resolution, revenue reporting
 - **Multi-language** — English, Sinhala (සිංහල), Tamil (தமிழ்)
 
@@ -38,7 +38,7 @@ WedLink is a two-sided marketplace connecting Sri Lankan couples with wedding ve
 | Database & Auth | Supabase (PostgreSQL + RLS) |
 | File Storage | Supabase Storage |
 | Realtime Messaging | Supabase Realtime |
-| Payments | Stripe (Checkout, Connect, Billing) |
+| Payments | PayHere (Checkout, Recurring, IPN) |
 | Email | Resend |
 | SMS | Twilio |
 | AI Features | OpenAI GPT-4o-mini |
@@ -53,7 +53,7 @@ WedLink is a two-sided marketplace connecting Sri Lankan couples with wedding ve
 ### Prerequisites
 - Node.js 18+ and npm
 - A Supabase account (free tier works)
-- A Stripe account (test mode)
+- A PayHere sandbox account (free at sandbox.payhere.lk)
 
 ```bash
 # 1. Install dependencies
@@ -103,67 +103,91 @@ Copy the full SQL from Section 5 and run it in Supabase SQL Editor.
 
 ---
 
-### 4.2 Stripe (Payments & Subscriptions)
+### 4.2 PayHere (Payment Gateway — Sri Lanka)
 
-WedLink uses three Stripe products:
-- **Checkout** — Deposit payments from couples
-- **Connect Express** — Automatic payouts to vendors
-- **Billing** — Vendor premium subscriptions ($15/mo or $150/yr)
+WedLink uses **PayHere**, the most widely used payment gateway in Sri Lanka, supporting:
+- LKR payments via Visa, Mastercard, Amex
+- Local mobile wallets: eZ Cash, FriMi, mCash
+- Internet banking (all major SL banks)
+- Recurring (preapproval) payments for vendor subscriptions
 
-**Get API keys:**
-1. https://dashboard.stripe.com/apikeys
-2. Copy Secret key → `STRIPE_SECRET_KEY`
-3. Copy Publishable key → `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`
+> **Why PayHere over Stripe?** Stripe does not support Sri Lanka as a merchant country. PayHere is trusted by Daraz, PickMe, and thousands of local businesses, and supports all LKR payment methods.
 
-**Enable Stripe Connect:**
-1. Settings → Connect settings → Enable Express accounts
-2. Set redirect URL: `https://yourdomain.com/vendor/settings?stripe=success`
+#### Payout model (Marketplace)
+Unlike Stripe Connect, PayHere does not auto-split payments. WedLink uses a **managed payout model**:
+1. Couple pays 100% through PayHere → funds land in WedLink's merchant account
+2. Platform retains 10% commission
+3. Vendor payout (90%) is disbursed via PayHere Disbursement API or direct bank transfer
+4. All transactions and payout status are tracked in the `payment_logs` table
 
-**Create subscription products:**
-Dashboard → Products → Add product:
-- Name: `WedLink Vendor Premium`
-- Monthly: $15.00 USD → copy Price ID
-- Yearly: $150.00 USD → copy Price ID
+---
 
-**Set up Webhooks:**
+**Step 1 — Create a sandbox account:**
+1. Go to https://sandbox.payhere.lk → Register as Merchant
+2. Complete the test merchant registration
+3. Log in → **Settings → Domains & Credentials**
+4. Add `localhost` and `yourdomain.com` under Allowed Domains
+5. Copy **Merchant ID** → `PAYHERE_MERCHANT_ID` and `NEXT_PUBLIC_PAYHERE_MERCHANT_ID`
+6. Copy **Merchant Secret** → `PAYHERE_MERCHANT_SECRET` (**never expose this publicly**)
 
-Local development:
+**Step 2 — Configure IPN (webhook) URL:**
+1. PayHere Dashboard → **Settings → Notifications**
+2. Set IPN URL to: `https://yourdomain.com/api/payments/webhooks`
+3. For local testing, use [ngrok](https://ngrok.com) to expose localhost:
 ```bash
-brew install stripe/stripe-cli/stripe
-stripe login
-stripe listen --forward-to localhost:3000/api/payments/webhooks
-# Copy the signing secret → STRIPE_WEBHOOK_SECRET
+ngrok http 3000
+# Copy the HTTPS URL e.g. https://abc123.ngrok.io
+# Set IPN URL to: https://abc123.ngrok.io/api/payments/webhooks
 ```
 
-Production (Dashboard → Developers → Webhooks → Add endpoint):
-- URL: `https://yourdomain.com/api/payments/webhooks`
-- Events to listen for:
-  - `payment_intent.succeeded`
-  - `payment_intent.payment_failed`
-  - `account.updated`
-  - `customer.subscription.created`
-  - `customer.subscription.updated`
-  - `customer.subscription.deleted`
-
-**Add deposit checkout to booking confirmation:**
+**Step 3 — Trigger a booking payment (frontend):**
 ```typescript
-// In your booking API route:
-import { stripe } from '@/lib/stripe'
-
-const session = await stripe.checkout.sessions.create({
-  payment_method_types: ['card'],
-  line_items: [{ price_data: {
-    currency: 'lkr',
-    product_data: { name: `Deposit — ${vendorName}` },
-    unit_amount: depositAmountInCents,
-  }, quantity: 1 }],
-  mode: 'payment',
-  success_url: `${process.env.NEXT_PUBLIC_APP_URL}/couple/bookings?success=true`,
-  cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/couple/bookings`,
-  metadata: { booking_id: bookingId },
+// 1. Get checkout payload from your API
+const res = await fetch('/api/payments/checkout', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ booking_id, amount_lkr }),
 })
-return NextResponse.json({ url: session.url })
+const payload = await res.json()
+const { checkout_url, ...formFields } = payload
+
+// 2. Submit a form to PayHere's hosted checkout
+const form = document.createElement('form')
+form.method = 'POST'
+form.action = checkout_url
+Object.entries(formFields).forEach(([key, value]) => {
+  const input = document.createElement('input')
+  input.type = 'hidden'
+  input.name = key
+  input.value = value as string
+  form.appendChild(input)
+})
+document.body.appendChild(form)
+form.submit()
 ```
+
+**Step 4 — Trigger vendor Premium subscription (frontend):**
+```typescript
+// Same pattern — call /api/payments/subscribe instead
+const res = await fetch('/api/payments/subscribe', { method: 'POST' })
+const payload = await res.json()
+// submit form to payload.checkout_url (recurring checkout)
+```
+
+**Step 5 — Switch to production:**
+1. Apply for a live PayHere merchant account at https://www.payhere.lk → Merchant Sign Up
+2. You'll need: NIC/Passport, business registration, bank details
+3. Once approved, replace sandbox credentials with live credentials in `.env.local`
+4. Change `NEXT_PUBLIC_PAYHERE_ENV=production`
+5. Update IPN URL to production domain in PayHere dashboard
+
+**Supported payment methods (auto-shown in PayHere checkout):**
+
+| Method | Cards | eZ Cash | FriMi | mCash | Internet Banking |
+|---|---|---|---|---|---|
+| Supported | ✅ Visa/MC/Amex | ✅ | ✅ | ✅ | ✅ All major SL banks |
+
+**Code reference:** `src/lib/payhere.ts` — all hash generation, IPN verification, and payload builders.
 
 ---
 
@@ -289,7 +313,8 @@ CREATE TABLE vendor_profiles (
   subscription_tier TEXT DEFAULT 'free' CHECK (subscription_tier IN ('free','premium')),
   portfolio_images TEXT[] DEFAULT '{}',
   video_url TEXT, website_url TEXT, instagram_url TEXT, facebook_url TEXT,
-  stripe_connect_account_id TEXT, payout_enabled BOOLEAN DEFAULT FALSE,
+  payhere_merchant_id TEXT, payout_enabled BOOLEAN DEFAULT FALSE,
+  subscription_payment_id TEXT, subscription_expires_at TIMESTAMPTZ,
   avg_rating NUMERIC DEFAULT 0, review_count INTEGER DEFAULT 0,
   profile_completeness INTEGER DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT NOW()
@@ -302,7 +327,7 @@ CREATE TABLE bookings (
   status TEXT DEFAULT 'inquiry' CHECK (status IN ('inquiry','negotiating','awaiting_payment','confirmed','completed','cancelled','expired','refunded','disputed')),
   event_date DATE NOT NULL, service_description TEXT,
   estimated_guests INTEGER, agreed_price NUMERIC, deposit_amount NUMERIC,
-  stripe_payment_id TEXT, invoice_url TEXT, notes TEXT,
+  payhere_payment_id TEXT, payhere_payment_method TEXT, invoice_url TEXT, notes TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -345,6 +370,45 @@ CREATE TABLE seating_tables (
   couple_id UUID NOT NULL REFERENCES couple_profiles(id) ON DELETE CASCADE,
   name TEXT NOT NULL, shape TEXT DEFAULT 'round', capacity INTEGER NOT NULL,
   position_x NUMERIC DEFAULT 0, position_y NUMERIC DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- PayHere payment audit log (all IPN notifications stored here)
+CREATE TABLE payment_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  booking_id UUID REFERENCES bookings(id),
+  payhere_payment_id TEXT,
+  amount NUMERIC NOT NULL,
+  currency TEXT DEFAULT 'LKR',
+  status TEXT NOT NULL,  -- 'success', 'failed', 'cancelled'
+  method TEXT,           -- 'VISA', 'MASTER', 'eZ Cash', etc.
+  raw_payload JSONB,     -- full IPN payload for debugging
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Vendor subscription billing history
+CREATE TABLE subscription_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  vendor_user_id UUID NOT NULL REFERENCES users(id),
+  payhere_payment_id TEXT,
+  amount NUMERIC NOT NULL,
+  currency TEXT DEFAULT 'LKR',
+  status TEXT NOT NULL,  -- 'success', 'failed'
+  next_billing_date TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Vendor payout tracking (manual / disbursement API)
+CREATE TABLE vendor_payouts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  vendor_id UUID NOT NULL REFERENCES vendor_profiles(id),
+  booking_id UUID REFERENCES bookings(id),
+  gross_amount NUMERIC NOT NULL,
+  commission_amount NUMERIC NOT NULL,
+  net_amount NUMERIC NOT NULL,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending','processing','paid','failed')),
+  paid_at TIMESTAMPTZ,
+  notes TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -513,9 +577,10 @@ See `.env.example` for the full template. Summary:
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase | ✅ |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase | ✅ |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase | ✅ |
-| `STRIPE_SECRET_KEY` | Stripe | ✅ |
-| `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | Stripe | ✅ |
-| `STRIPE_WEBHOOK_SECRET` | Stripe | ✅ |
+| `PAYHERE_MERCHANT_ID` | PayHere | ✅ |
+| `PAYHERE_MERCHANT_SECRET` | PayHere | ✅ |
+| `NEXT_PUBLIC_PAYHERE_MERCHANT_ID` | PayHere | ✅ |
+| `NEXT_PUBLIC_PAYHERE_ENV` | PayHere | ✅ (`sandbox` / `production`) |
 | `RESEND_API_KEY` | Resend | Email only |
 | `OPENAI_API_KEY` | OpenAI | AI features |
 | `TWILIO_ACCOUNT_SID` | Twilio | SMS only |
@@ -540,7 +605,7 @@ git push origin main
 
 **Post-deploy:**
 - Supabase → Auth → URL Configuration → Add `https://yourdomain.com/auth/callback`
-- Stripe → Update webhook URL to `https://yourdomain.com/api/payments/webhooks`
+- PayHere → Update IPN URL to `https://yourdomain.com/api/payments/webhooks` in Dashboard → Settings → Notifications
 - Custom domain: Vercel → Domains → Add `wedlink.lk`
 
 ---
@@ -554,12 +619,14 @@ git push origin main
 - [ ] Google OAuth redirect URIs set for production domain
 - [ ] Test signup → couple_profiles row auto-created
 
-**Stripe**
-- [ ] Switch to Live mode keys (not test)
-- [ ] Stripe Connect Express enabled
-- [ ] Premium subscription Price IDs updated in code
-- [ ] Production webhook endpoint active and verified
-- [ ] End-to-end payment test completed
+**PayHere**
+- [ ] Live merchant account approved by PayHere
+- [ ] Production Merchant ID & Secret in env vars
+- [ ] `NEXT_PUBLIC_PAYHERE_ENV=production`
+- [ ] Production IPN URL set in PayHere Dashboard → Settings → Notifications
+- [ ] Production domain added to PayHere Allowed Domains
+- [ ] End-to-end payment test with a real card completed
+- [ ] `payment_logs` and `subscription_logs` tables created in Supabase
 
 **Resend**
 - [ ] `wedlink.lk` domain verified

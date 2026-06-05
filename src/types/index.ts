@@ -52,13 +52,15 @@ export interface VendorProfile {
   is_verified: boolean
   status: VendorStatus
   subscription_tier: SubscriptionTier
+  subscription_payment_id?: string      // last PayHere recurring payment_id
+  subscription_expires_at?: string      // ISO date of next billing / expiry
   portfolio_images: string[]
   video_url?: string
   website_url?: string
   instagram_url?: string
   facebook_url?: string
-  stripe_connect_account_id?: string
-  payout_enabled: boolean
+  payhere_merchant_id?: string          // vendor's own PayHere merchant id (future)
+  payout_enabled: boolean               // true once admin approves payout
   avg_rating: number
   review_count: number
   profile_completeness: number
@@ -92,9 +94,10 @@ export interface Booking {
   event_date: string
   service_description: string
   estimated_guests?: number
-  agreed_price?: number
-  deposit_amount?: number
-  stripe_payment_id?: string
+  agreed_price?: number                 // in LKR
+  deposit_amount?: number               // in LKR
+  payhere_payment_id?: string           // PayHere payment_id from IPN
+  payhere_payment_method?: string       // e.g. "VISA", "MASTER", "eZ Cash"
   invoice_url?: string
   notes?: string
   created_at: string
