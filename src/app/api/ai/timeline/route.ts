@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server'
 
 // NOTE: Install openai package to enable: npm install openai
-// import OpenAI from 'openai'
-// const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+import OpenAI from 'openai'
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 export async function POST(request: Request) {
   const body = await request.json()
@@ -36,7 +36,7 @@ export async function POST(request: Request) {
   ]
 
   // Uncomment and use when OpenAI is configured:
-  /*
+  
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -51,7 +51,6 @@ export async function POST(request: Request) {
   } catch (err) {
     return NextResponse.json({ timeline: fallbackTimeline })
   }
-  */
 
   return NextResponse.json({ timeline: fallbackTimeline })
 }
